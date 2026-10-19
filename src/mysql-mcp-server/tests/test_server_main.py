@@ -168,6 +168,120 @@ class TestMainArgvParsing:
     @patch('awslabs.mysql_mcp_server.server.db_connection_map')
     @patch('awslabs.mysql_mcp_server.server.asyncio.run')
     @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
+    def test_db_user_flag_propagates_to_global(
+        self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run, base_argv
+    ):
+        """--db_user should propagate to the module-level db_user_override."""
+        from awslabs.mysql_mcp_server import server
+
+        mock_connect.return_value = (MagicMock(), json.dumps({}))
+        mock_asyncio_run.return_value = [{'columnMetadata': [], 'records': []}]
+        argv = list(base_argv) + ['--db_user', 'support_agent']
+
+        with patch.object(sys, 'argv', argv):
+            server.main()
+
+        assert server.db_user_override == 'support_agent'
+
+    @patch('awslabs.mysql_mcp_server.server.mcp.run')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    @patch('awslabs.mysql_mcp_server.server.asyncio.run')
+    @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
+    def test_db_user_flag_unset_leaves_global_none(
+        self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run, base_argv
+    ):
+        """Omitting --db_user must leave db_user_override at its default (None).
+
+        Preserving today's behavior (connect as the master user).
+        """
+        from awslabs.mysql_mcp_server import server
+
+        mock_connect.return_value = (MagicMock(), json.dumps({}))
+        mock_asyncio_run.return_value = [{'columnMetadata': [], 'records': []}]
+
+        with patch.object(sys, 'argv', base_argv):
+            server.main()
+
+        assert server.db_user_override is None
+
+    @patch('awslabs.mysql_mcp_server.server.mcp.run')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    @patch('awslabs.mysql_mcp_server.server.asyncio.run')
+    @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
+    def test_max_rows_flag_propagates_to_global(
+        self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run, base_argv
+    ):
+        """--max_rows should propagate to the module-level max_rows, as an int."""
+        from awslabs.mysql_mcp_server import server
+
+        mock_connect.return_value = (MagicMock(), json.dumps({}))
+        mock_asyncio_run.return_value = [{'columnMetadata': [], 'records': []}]
+        argv = list(base_argv) + ['--max_rows', '100']
+
+        with patch.object(sys, 'argv', argv):
+            server.main()
+
+        assert server.max_rows == 100
+
+    @patch('awslabs.mysql_mcp_server.server.mcp.run')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    @patch('awslabs.mysql_mcp_server.server.asyncio.run')
+    @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
+    def test_max_rows_flag_unset_leaves_global_none(
+        self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run, base_argv
+    ):
+        """Omitting --max_rows must leave max_rows at its default (None), i.e. unlimited."""
+        from awslabs.mysql_mcp_server import server
+
+        mock_connect.return_value = (MagicMock(), json.dumps({}))
+        mock_asyncio_run.return_value = [{'columnMetadata': [], 'records': []}]
+
+        with patch.object(sys, 'argv', base_argv):
+            server.main()
+
+        assert server.max_rows is None
+
+    @patch('awslabs.mysql_mcp_server.server.mcp.run')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    @patch('awslabs.mysql_mcp_server.server.asyncio.run')
+    @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
+    def test_max_execution_time_ms_flag_propagates_to_global(
+        self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run, base_argv
+    ):
+        """--max_execution_time_ms should propagate to the module-level global, as an int."""
+        from awslabs.mysql_mcp_server import server
+
+        mock_connect.return_value = (MagicMock(), json.dumps({}))
+        mock_asyncio_run.return_value = [{'columnMetadata': [], 'records': []}]
+        argv = list(base_argv) + ['--max_execution_time_ms', '5000']
+
+        with patch.object(sys, 'argv', argv):
+            server.main()
+
+        assert server.max_execution_time_ms == 5000
+
+    @patch('awslabs.mysql_mcp_server.server.mcp.run')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    @patch('awslabs.mysql_mcp_server.server.asyncio.run')
+    @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
+    def test_max_execution_time_ms_flag_unset_leaves_global_none(
+        self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run, base_argv
+    ):
+        """Omitting --max_execution_time_ms must leave the global at its default (None)."""
+        from awslabs.mysql_mcp_server import server
+
+        mock_connect.return_value = (MagicMock(), json.dumps({}))
+        mock_asyncio_run.return_value = [{'columnMetadata': [], 'records': []}]
+
+        with patch.object(sys, 'argv', base_argv):
+            server.main()
+
+        assert server.max_execution_time_ms is None
+
+    @patch('awslabs.mysql_mcp_server.server.mcp.run')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    @patch('awslabs.mysql_mcp_server.server.asyncio.run')
+    @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
     def test_close_all_sync_runs_even_when_mcp_run_raises(
         self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run, base_argv
     ):

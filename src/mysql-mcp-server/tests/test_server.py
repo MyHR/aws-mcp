@@ -177,6 +177,20 @@ class TestConnectToDatabase:
         )
 
 
+class TestConnectToDatabaseDoesNotExposeDbUser:
+    """db_user must stay a server-operator CLI flag, never a tool parameter.
+
+    The LLM client must never be able to choose it.
+    """
+
+    def test_db_user_is_not_a_tool_parameter(self):
+        """connect_to_database's signature must not accept db_user."""
+        import inspect
+        from awslabs.mysql_mcp_server.server import connect_to_database
+
+        assert 'db_user' not in inspect.signature(connect_to_database).parameters
+
+
 class TestCreateCluster:
     """Tests for create_cluster."""
 

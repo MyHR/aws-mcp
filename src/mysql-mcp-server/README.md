@@ -143,6 +143,67 @@ directly via `mysqlwire` with the endpoint, port, and credentials.
 - RDS Data API must be enabled on the Aurora MySQL cluster
 - Appropriate IAM permissions for Data API access
 
+### Connecting as a specific database user
+
+By default the server connects as the instance/cluster's master user
+(`MasterUsername`, as reported by AWS). Pass `--db_user <name>` to connect as
+a different, operator-chosen user instead — for example a dedicated
+least-privilege user with narrower grants than the master user. This is a
+server-startup flag only; it is not exposed as an MCP tool parameter, so the
+LLM client can never choose or change the connecting user.
+
+```
+uvx awslabs.mysql-mcp-server@latest --db_user my_readonly_user ...
+```
+
+Behavior depends on the connection method:
+
+- **`mysqlwire_iam`**: `--db_user` is the IAM-auth user the token is minted
+  for. The user must exist in MySQL as `IDENTIFIED WITH AWSAuthenticationPlugin`
+  and the caller's AWS identity needs `rds-db:connect` for that user.
+- **`mysqlwire` with a Secrets Manager secret**: the secret already supplies
+  the actual connecting credentials (username and password), so `--db_user`
+  cannot select the user here. Instead it asserts what you expect that
+  username to be — if the secret's username differs, the connection fails
+  immediately with a clear error instead of silently connecting as a
+  different user than requested.
+- **`rdsapi`**: not applicable; the RDS Data API authenticates via the
+  secret only.
+
+Omit `--db_user` to keep today's default behavior unchanged.
+
+### Limiting rows returned
+
+Pass `--max_rows <n>` to cap how many rows a wire-protocol (`mysqlwire` /
+`mysqlwire_iam`) `run_query` call returns to the LLM client:
+
+```
+uvx awslabs.mysql-mcp-server@latest --max_rows 100 ...
+```
+
+Rows beyond `n` are never fetched off the result set. If the query matched
+more rows than `n`, the response includes an extra entry with
+`"truncated": true` and the number of rows actually returned, so the caller
+knows the result was cut rather than mistaking it for the complete result
+set. Omit `--max_rows` for unlimited rows (default, unchanged behavior).
+Not applicable to `rdsapi`.
+
+### Limiting statement execution time
+
+Pass `--max_execution_time_ms <n>` to cap how long a single statement may
+run on wire-protocol (`mysqlwire` / `mysqlwire_iam`) connections:
+
+```
+uvx awslabs.mysql-mcp-server@latest --max_execution_time_ms 30000 ...
+```
+
+This runs `SET SESSION max_execution_time = <n>` on every connection the
+pool opens, including connections created after a pool refresh (for
+`mysqlwire_iam`, the pool is recreated roughly every 14 minutes to pick up
+a fresh IAM auth token — the limit is re-applied each time, not just on the
+first connection). Omit to leave statements unbounded (default, unchanged
+behavior). Not applicable to `rdsapi`.
+
 ### AWS Authentication
 
 The MCP server uses the AWS profile specified in the AWS_PROFILE environment variable. If not provided, it defaults to the "default" profile in your AWS configuration file.

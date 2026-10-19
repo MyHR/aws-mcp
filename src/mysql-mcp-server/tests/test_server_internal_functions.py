@@ -301,6 +301,363 @@ class TestInternalConnectToDatabaseMySQLWire:
         assert call_kwargs['is_iam_auth'] is True
 
 
+class TestInternalConnectToDatabaseDbUserOverride:
+    """Tests for the --db_user override (module-level db_user_override global)."""
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_iam_connection_uses_override_instead_of_masteruser(
+        self, mock_map, mock_get_props, mock_asyncmy_cls
+    ):
+        """With db_user_override set, IAM should mint the token for the override.
+
+        Not for MasterUsername.
+        """
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = {
+            'HttpEndpointEnabled': False,
+            'MasterUsername': 'admin',
+            'DBClusterArn': 'arn:cluster',
+            'MasterUserSecret': {'SecretArn': 'arn:secret'},
+            'Endpoint': 'ep.rds.amazonaws.com',
+            'Port': '3306',
+        }
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        original = server.db_user_override
+        try:
+            server.db_user_override = 'support_agent'
+            internal_connect_to_database(
+                region='us-east-1',
+                database_type=DatabaseType.AURORA_MYSQL,
+                connection_method=ConnectionMethod.MYSQL_WIRE_IAM_PROTOCOL,
+                cluster_identifier='cluster-1',
+                db_endpoint='ep.rds.amazonaws.com',
+                port=3306,
+                database='testdb',
+            )
+        finally:
+            server.db_user_override = original
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['db_user'] == 'support_agent'
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_iam_connection_default_unchanged_without_override(
+        self, mock_map, mock_get_props, mock_asyncmy_cls
+    ):
+        """Unset db_user_override must leave today's behavior (MasterUsername) unchanged."""
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = {
+            'HttpEndpointEnabled': False,
+            'MasterUsername': 'admin',
+            'DBClusterArn': 'arn:cluster',
+            'MasterUserSecret': {'SecretArn': 'arn:secret'},
+            'Endpoint': 'ep.rds.amazonaws.com',
+            'Port': '3306',
+        }
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        assert server.db_user_override is None
+        internal_connect_to_database(
+            region='us-east-1',
+            database_type=DatabaseType.AURORA_MYSQL,
+            connection_method=ConnectionMethod.MYSQL_WIRE_IAM_PROTOCOL,
+            cluster_identifier='cluster-1',
+            db_endpoint='ep.rds.amazonaws.com',
+            port=3306,
+            database='testdb',
+        )
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['db_user'] == 'admin'
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_wire_protocol_passes_override_as_expected_db_user(
+        self, mock_map, mock_get_props, mock_asyncmy_cls
+    ):
+        """MYSQL_WIRE_PROTOCOL must pass db_user_override through as expected_db_user.
+
+        Not as db_user — the secret, not the CLI flag, selects the connecting user.
+        """
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = {
+            'HttpEndpointEnabled': False,
+            'MasterUsername': 'admin',
+            'DBClusterArn': 'arn:cluster',
+            'MasterUserSecret': {'SecretArn': 'arn:secret'},
+            'Endpoint': 'ep.rds.amazonaws.com',
+            'Port': '3306',
+        }
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        original = server.db_user_override
+        try:
+            server.db_user_override = 'support_agent'
+            internal_connect_to_database(
+                region='us-east-1',
+                database_type=DatabaseType.AURORA_MYSQL,
+                connection_method=ConnectionMethod.MYSQL_WIRE_PROTOCOL,
+                cluster_identifier='cluster-1',
+                db_endpoint='ep.rds.amazonaws.com',
+                port=3306,
+                database='testdb',
+            )
+        finally:
+            server.db_user_override = original
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['db_user'] == ''
+        assert call_kwargs['expected_db_user'] == 'support_agent'
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_wire_protocol_default_unchanged_without_override(
+        self, mock_map, mock_get_props, mock_asyncmy_cls
+    ):
+        """Unset db_user_override must leave expected_db_user as None (no-op)."""
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = {
+            'HttpEndpointEnabled': False,
+            'MasterUsername': 'admin',
+            'DBClusterArn': 'arn:cluster',
+            'MasterUserSecret': {'SecretArn': 'arn:secret'},
+            'Endpoint': 'ep.rds.amazonaws.com',
+            'Port': '3306',
+        }
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        assert server.db_user_override is None
+        internal_connect_to_database(
+            region='us-east-1',
+            database_type=DatabaseType.AURORA_MYSQL,
+            connection_method=ConnectionMethod.MYSQL_WIRE_PROTOCOL,
+            cluster_identifier='cluster-1',
+            db_endpoint='ep.rds.amazonaws.com',
+            port=3306,
+            database='testdb',
+        )
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['expected_db_user'] is None
+
+
+class TestInternalConnectToDatabaseMaxRows:
+    """Tests for the --max_rows override (module-level max_rows global)."""
+
+    @staticmethod
+    def _cluster_props():
+        return {
+            'HttpEndpointEnabled': False,
+            'MasterUsername': 'admin',
+            'DBClusterArn': 'arn:cluster',
+            'MasterUserSecret': {'SecretArn': 'arn:secret'},
+            'Endpoint': 'ep.rds.amazonaws.com',
+            'Port': '3306',
+        }
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_wire_protocol_passes_max_rows_through(
+        self, mock_map, mock_get_props, mock_asyncmy_cls
+    ):
+        """MYSQL_WIRE_PROTOCOL should pass the module-level max_rows override through."""
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = self._cluster_props()
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        original = server.max_rows
+        try:
+            server.max_rows = 50
+            internal_connect_to_database(
+                region='us-east-1',
+                database_type=DatabaseType.AURORA_MYSQL,
+                connection_method=ConnectionMethod.MYSQL_WIRE_PROTOCOL,
+                cluster_identifier='cluster-1',
+                db_endpoint='ep.rds.amazonaws.com',
+                port=3306,
+                database='testdb',
+            )
+        finally:
+            server.max_rows = original
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['max_rows'] == 50
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_iam_passes_max_rows_through(self, mock_map, mock_get_props, mock_asyncmy_cls):
+        """MYSQL_WIRE_IAM_PROTOCOL should pass the module-level max_rows override through."""
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = self._cluster_props()
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        original = server.max_rows
+        try:
+            server.max_rows = 50
+            internal_connect_to_database(
+                region='us-east-1',
+                database_type=DatabaseType.AURORA_MYSQL,
+                connection_method=ConnectionMethod.MYSQL_WIRE_IAM_PROTOCOL,
+                cluster_identifier='cluster-1',
+                db_endpoint='ep.rds.amazonaws.com',
+                port=3306,
+                database='testdb',
+            )
+        finally:
+            server.max_rows = original
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['max_rows'] == 50
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_default_unchanged_without_override(self, mock_map, mock_get_props, mock_asyncmy_cls):
+        """Unset max_rows (None) must leave today's unlimited-rows behavior unchanged."""
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = self._cluster_props()
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        assert server.max_rows is None
+        internal_connect_to_database(
+            region='us-east-1',
+            database_type=DatabaseType.AURORA_MYSQL,
+            connection_method=ConnectionMethod.MYSQL_WIRE_PROTOCOL,
+            cluster_identifier='cluster-1',
+            db_endpoint='ep.rds.amazonaws.com',
+            port=3306,
+            database='testdb',
+        )
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['max_rows'] is None
+
+
+class TestInternalConnectToDatabaseMaxExecutionTime:
+    """Tests for the --max_execution_time_ms override (module-level global)."""
+
+    @staticmethod
+    def _cluster_props():
+        return {
+            'HttpEndpointEnabled': False,
+            'MasterUsername': 'admin',
+            'DBClusterArn': 'arn:cluster',
+            'MasterUserSecret': {'SecretArn': 'arn:secret'},
+            'Endpoint': 'ep.rds.amazonaws.com',
+            'Port': '3306',
+        }
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_iam_passes_max_execution_time_through(
+        self, mock_map, mock_get_props, mock_asyncmy_cls
+    ):
+        """MYSQL_WIRE_IAM_PROTOCOL should pass max_execution_time_ms through."""
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = self._cluster_props()
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        original = server.max_execution_time_ms
+        try:
+            server.max_execution_time_ms = 5000
+            internal_connect_to_database(
+                region='us-east-1',
+                database_type=DatabaseType.AURORA_MYSQL,
+                connection_method=ConnectionMethod.MYSQL_WIRE_IAM_PROTOCOL,
+                cluster_identifier='cluster-1',
+                db_endpoint='ep.rds.amazonaws.com',
+                port=3306,
+                database='testdb',
+            )
+        finally:
+            server.max_execution_time_ms = original
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['max_execution_time_ms'] == 5000
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_wire_protocol_passes_max_execution_time_through(
+        self, mock_map, mock_get_props, mock_asyncmy_cls
+    ):
+        """MYSQL_WIRE_PROTOCOL should pass max_execution_time_ms through."""
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = self._cluster_props()
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        original = server.max_execution_time_ms
+        try:
+            server.max_execution_time_ms = 5000
+            internal_connect_to_database(
+                region='us-east-1',
+                database_type=DatabaseType.AURORA_MYSQL,
+                connection_method=ConnectionMethod.MYSQL_WIRE_PROTOCOL,
+                cluster_identifier='cluster-1',
+                db_endpoint='ep.rds.amazonaws.com',
+                port=3306,
+                database='testdb',
+            )
+        finally:
+            server.max_execution_time_ms = original
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['max_execution_time_ms'] == 5000
+
+    @patch('awslabs.mysql_mcp_server.server.AsyncmyPoolConnection')
+    @patch('awslabs.mysql_mcp_server.server.internal_get_cluster_properties')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    def test_default_unchanged_without_override(self, mock_map, mock_get_props, mock_asyncmy_cls):
+        """Unset max_execution_time_ms (None) must leave today's behavior unchanged."""
+        import awslabs.mysql_mcp_server.server as server
+
+        mock_map.get.return_value = None
+        mock_get_props.return_value = self._cluster_props()
+        mock_asyncmy_cls.return_value = MagicMock()
+
+        assert server.max_execution_time_ms is None
+        internal_connect_to_database(
+            region='us-east-1',
+            database_type=DatabaseType.AURORA_MYSQL,
+            connection_method=ConnectionMethod.MYSQL_WIRE_IAM_PROTOCOL,
+            cluster_identifier='cluster-1',
+            db_endpoint='ep.rds.amazonaws.com',
+            port=3306,
+            database='testdb',
+        )
+
+        call_kwargs = mock_asyncmy_cls.call_args[1]
+        assert call_kwargs['max_execution_time_ms'] is None
+
+
 class TestInternalConnectToDatabaseRDSMySQL:
     """Tests for RDS MySQL (no cluster_identifier) connection."""
 

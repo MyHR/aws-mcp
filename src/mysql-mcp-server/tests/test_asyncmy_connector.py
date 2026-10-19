@@ -159,6 +159,62 @@ class TestAsyncmyPoolConnectionInitializePool:
         'awslabs.mysql_mcp_server.connection.asyncmy_pool_connection.asyncmy.create_pool',
         new_callable=AsyncMock,
     )
+    async def test_initialize_pool_with_secret_and_matching_expected_user(self, mock_create_pool):
+        """expected_db_user matching the secret's username should connect normally."""
+        mock_pool = MagicMock()
+        mock_create_pool.return_value = mock_pool
+
+        conn = AsyncmyPoolConnection(
+            host='localhost',
+            port=3306,
+            database='testdb',
+            readonly=True,
+            secret_arn='arn:secret',
+            db_user='',
+            region='us-east-1',
+            is_iam_auth=False,
+            is_test=True,
+            expected_db_user='test_user',
+        )
+
+        await conn.initialize_pool()
+
+        mock_create_pool.assert_called_once()
+        assert conn.pool is mock_pool
+
+    @patch(
+        'awslabs.mysql_mcp_server.connection.asyncmy_pool_connection.asyncmy.create_pool',
+        new_callable=AsyncMock,
+    )
+    async def test_initialize_pool_with_secret_and_mismatched_expected_user_raises(
+        self, mock_create_pool
+    ):
+        """expected_db_user mismatch must fail loudly.
+
+        Must not silently connect as the secret's (different) user.
+        """
+        conn = AsyncmyPoolConnection(
+            host='localhost',
+            port=3306,
+            database='testdb',
+            readonly=True,
+            secret_arn='arn:secret',
+            db_user='',
+            region='us-east-1',
+            is_iam_auth=False,
+            is_test=True,
+            expected_db_user='support_agent',
+        )
+
+        with pytest.raises(ValueError, match='support_agent'):
+            await conn.initialize_pool()
+
+        mock_create_pool.assert_not_called()
+
+    @patch(
+        'awslabs.mysql_mcp_server.connection.asyncmy_pool_connection.asyncmy.create_pool',
+        new_callable=AsyncMock,
+    )
     @patch('awslabs.mysql_mcp_server.connection.asyncmy_pool_connection.boto3.client')
     async def test_initialize_pool_with_iam(self, mock_boto_client, mock_create_pool):
         """Should initialize pool using IAM auth token."""
@@ -214,6 +270,59 @@ class TestAsyncmyPoolConnectionInitializePool:
         await conn.initialize_pool()
 
         mock_create_pool.assert_called_once()
+
+    @patch(
+        'awslabs.mysql_mcp_server.connection.asyncmy_pool_connection.asyncmy.create_pool',
+        new_callable=AsyncMock,
+    )
+    async def test_initialize_pool_passes_max_execution_time_init_command(self, mock_create_pool):
+        """max_execution_time_ms should become a SET SESSION init_command for create_pool."""
+        mock_create_pool.return_value = MagicMock()
+
+        conn = AsyncmyPoolConnection(
+            host='localhost',
+            port=3306,
+            database='testdb',
+            readonly=True,
+            secret_arn='arn:secret',
+            db_user='',
+            region='us-east-1',
+            is_iam_auth=False,
+            is_test=True,
+            max_execution_time_ms=5000,
+        )
+
+        await conn.initialize_pool()
+
+        call_kwargs = mock_create_pool.call_args[1]
+        assert call_kwargs['init_command'] == 'SET SESSION max_execution_time = 5000'
+
+    @patch(
+        'awslabs.mysql_mcp_server.connection.asyncmy_pool_connection.asyncmy.create_pool',
+        new_callable=AsyncMock,
+    )
+    async def test_initialize_pool_unset_max_execution_time_leaves_init_command_none(
+        self, mock_create_pool
+    ):
+        """Unset max_execution_time_ms must leave init_command None (unchanged behavior)."""
+        mock_create_pool.return_value = MagicMock()
+
+        conn = AsyncmyPoolConnection(
+            host='localhost',
+            port=3306,
+            database='testdb',
+            readonly=True,
+            secret_arn='arn:secret',
+            db_user='',
+            region='us-east-1',
+            is_iam_auth=False,
+            is_test=True,
+        )
+
+        await conn.initialize_pool()
+
+        call_kwargs = mock_create_pool.call_args[1]
+        assert call_kwargs['init_command'] is None
 
 
 class TestAsyncmyPoolConnectionExecuteQuery:
@@ -660,6 +769,43 @@ class TestAsyncmyPoolConnectionCheckExpiry:
         # Pool should have been closed and recreated (called twice total)
         assert mock_create_pool.call_count == 2
 
+    @patch(
+        'awslabs.mysql_mcp_server.connection.asyncmy_pool_connection.asyncmy.create_pool',
+        new_callable=AsyncMock,
+    )
+    async def test_max_execution_time_reapplied_after_pool_refresh(self, mock_create_pool):
+        """SET SESSION max_execution_time must apply to post-refresh connections too.
+
+        Not just the initial pool — e.g. the 14-minute IAM auth token refresh.
+        """
+        mock_pool = MagicMock()
+        mock_pool.close = MagicMock()
+        mock_pool.wait_closed = AsyncMock()
+        mock_create_pool.return_value = mock_pool
+
+        conn = AsyncmyPoolConnection(
+            host='localhost',
+            port=3306,
+            database='testdb',
+            readonly=True,
+            secret_arn='arn:secret',
+            db_user='',
+            region='us-east-1',
+            is_iam_auth=False,
+            pool_expiry_min=30,
+            is_test=True,
+            max_execution_time_ms=5000,
+        )
+        await conn.initialize_pool()
+        # Force expiry to trigger a pool recreation.
+        conn.created_time = datetime.now() - timedelta(minutes=31)
+
+        await conn.check_expiry()
+
+        assert mock_create_pool.call_count == 2
+        for call in mock_create_pool.call_args_list:
+            assert call.kwargs['init_command'] == 'SET SESSION max_execution_time = 5000'
+
 
 class TestAsyncmyPoolConnectionGetCredentials:
     """Tests for _get_credentials_from_secret."""
@@ -934,7 +1080,7 @@ class TestExecuteQueryResultShaping:
         with patch.object(conn, '_get_connection', new=AsyncMock(return_value=conn_cm)):
             result = await conn.execute_query('UPDATE t SET x=1')
 
-        assert result == {'columnMetadata': [], 'records': []}
+        assert result == {'columnMetadata': [], 'records': [], 'truncated': False}
 
     async def test_no_params_path_calls_execute_with_sql_only(self):
         """When parameters=None, cursor.execute is called with just the SQL."""
@@ -959,6 +1105,108 @@ class TestExecuteQueryResultShaping:
 
         # Single positional arg = SQL string only, no parameter conversion.
         cursor.execute.assert_awaited_once_with('SELECT 1')
+
+
+class TestExecuteQueryMaxRows:
+    """Tests for the max_rows truncation behavior in execute_query."""
+
+    @staticmethod
+    def _build_conn(max_rows=None):
+        return AsyncmyPoolConnection(
+            host='localhost',
+            port=3306,
+            database='testdb',
+            readonly=False,
+            secret_arn='arn:secret',
+            db_user='',
+            region='us-east-1',
+            is_iam_auth=False,
+            is_test=True,
+            max_rows=max_rows,
+        )
+
+    @staticmethod
+    def _make_pool(description, fetchmany_rows, rowcount):
+        """Fake pool whose cursor supports fetchmany + rowcount (set by execute())."""
+        cursor = MagicMock()
+        cursor.description = description
+        cursor.rowcount = rowcount
+        cursor.fetchmany = AsyncMock(return_value=fetchmany_rows)
+        cursor.fetchall = AsyncMock(side_effect=AssertionError('fetchall must not be called'))
+        cursor.execute = AsyncMock()
+
+        cursor_cm = MagicMock()
+        cursor_cm.__aenter__ = AsyncMock(return_value=cursor)
+        cursor_cm.__aexit__ = AsyncMock(return_value=False)
+
+        conn = MagicMock()
+        conn.cursor = MagicMock(return_value=cursor_cm)
+        conn.autocommit = AsyncMock()
+        conn.rollback = AsyncMock()
+
+        conn_cm = MagicMock()
+        conn_cm.__aenter__ = AsyncMock(return_value=conn)
+        conn_cm.__aexit__ = AsyncMock(return_value=False)
+        return conn_cm, cursor
+
+    async def test_more_rows_than_max_rows_sets_truncated_and_caps_rows(self):
+        """Rowcount > fetched rows: truncated=True and exactly max_rows records."""
+        conn = self._build_conn(max_rows=2)
+        description = [('id',)]
+        conn_cm, cursor = self._make_pool(
+            description, fetchmany_rows=[{'id': 1}, {'id': 2}], rowcount=5
+        )
+
+        with patch.object(conn, '_get_connection', new=AsyncMock(return_value=conn_cm)):
+            result = await conn.execute_query('SELECT id FROM t')
+
+        cursor.fetchmany.assert_awaited_once_with(2)
+        cursor.fetchall.assert_not_called()
+        assert result['truncated'] is True
+        assert len(result['records']) == 2
+
+    async def test_rows_within_max_rows_leaves_truncated_false(self):
+        """Rowcount <= fetched rows: truncated=False and all rows returned."""
+        conn = self._build_conn(max_rows=5)
+        description = [('id',)]
+        conn_cm, cursor = self._make_pool(
+            description, fetchmany_rows=[{'id': 1}, {'id': 2}], rowcount=2
+        )
+
+        with patch.object(conn, '_get_connection', new=AsyncMock(return_value=conn_cm)):
+            result = await conn.execute_query('SELECT id FROM t')
+
+        cursor.fetchmany.assert_awaited_once_with(5)
+        assert result['truncated'] is False
+        assert len(result['records']) == 2
+
+    async def test_unset_max_rows_uses_fetchall_and_is_never_truncated(self):
+        """max_rows=None (default) must preserve today's fetchall()-based behavior."""
+        conn = self._build_conn(max_rows=None)
+        description = [('id',)]
+        cursor = MagicMock()
+        cursor.description = description
+        cursor.fetchall = AsyncMock(return_value=[{'id': 1}, {'id': 2}, {'id': 3}])
+        cursor.fetchmany = AsyncMock(side_effect=AssertionError('fetchmany must not be called'))
+        cursor.execute = AsyncMock()
+
+        cursor_cm = MagicMock()
+        cursor_cm.__aenter__ = AsyncMock(return_value=cursor)
+        cursor_cm.__aexit__ = AsyncMock(return_value=False)
+        pool_conn = MagicMock()
+        pool_conn.cursor = MagicMock(return_value=cursor_cm)
+        pool_conn.autocommit = AsyncMock()
+        pool_conn.rollback = AsyncMock()
+        conn_cm = MagicMock()
+        conn_cm.__aenter__ = AsyncMock(return_value=pool_conn)
+        conn_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(conn, '_get_connection', new=AsyncMock(return_value=conn_cm)):
+            result = await conn.execute_query('SELECT id FROM t')
+
+        cursor.fetchall.assert_awaited_once()
+        assert result['truncated'] is False
+        assert len(result['records']) == 3
 
 
 class TestGetCredentialsFromSecretTestMode:

@@ -43,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `--db_user <name>`: connect as an operator-chosen database user instead of
+  the instance/cluster's master user. CLI-only (not an MCP tool parameter),
+  so the LLM client can never choose the connecting user. For
+  `mysqlwire_iam`, selects the IAM-auth user. For `mysqlwire` with a Secrets
+  Manager secret, asserts the expected username and fails clearly on a
+  mismatch rather than silently using the secret's own user. Unset leaves
+  existing behavior unchanged.
+- `--max_rows <n>`: cap the number of rows a wire-protocol (`mysqlwire` /
+  `mysqlwire_iam`) `run_query` call returns to the LLM client. Uses
+  `fetchmany(n)`, never `fetchall()` followed by a Python-side slice, so
+  excess rows are never pulled into the result. When the query matched more
+  rows than `n`, the response carries an explicit truncation marker. Unset
+  means unlimited rows (unchanged behavior).
+- `--max_execution_time_ms <n>`: cap statement execution time on
+  wire-protocol (`mysqlwire` / `mysqlwire_iam`) connections via
+  `SET SESSION max_execution_time`, applied through `asyncmy.create_pool`'s
+  `init_command` so it runs on every connection the pool opens — including
+  connections created after a pool refresh (the ~14-minute IAM auth token
+  refresh recreates the pool). Unset means no limit (unchanged behavior).
+
 ### Security
 
 - **CWE-184** — read-only mode now rejects statement-leading mutating verbs

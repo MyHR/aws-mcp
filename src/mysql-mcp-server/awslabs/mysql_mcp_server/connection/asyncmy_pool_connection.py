@@ -98,6 +98,9 @@ class AsyncmyPoolConnection(AbstractDBConnection):
         max_size: int = 10,
         is_test: bool = False,
         ca_bundle_path: Optional[str] = None,
+        expected_db_user: Optional[str] = None,
+        max_rows: Optional[int] = None,
+        max_execution_time_ms: Optional[int] = None,
     ):
         """Initialize a new DB connection pool.
 
@@ -118,6 +121,21 @@ class AsyncmyPoolConnection(AbstractDBConnection):
                 for SSL verification on credentialed connections (IAM auth or
                 Secrets Manager). When set, the bundled Amazon RDS CA bundle is
                 ignored.
+            expected_db_user: Only meaningful for Secrets Manager auth (not
+                IAM auth, which already selects the user via db_user). The
+                secret supplies the actual connecting credentials, so this is
+                not a user selector — it asserts what the operator expects
+                that user to be, and pool init fails loudly if the secret's
+                username differs, instead of silently connecting as a
+                different user than requested.
+            max_rows: Optional ceiling on the number of rows execute_query
+                returns. When set and the result set has more rows than
+                this, only the first max_rows are fetched and the result
+                carries a truncation marker. None means unlimited (default).
+            max_execution_time_ms: Optional per-session statement execution
+                time limit in milliseconds, applied to every connection the
+                pool creates (including ones created after a pool refresh).
+                None means no limit (default).
         """
         super().__init__(readonly)
         self.host = host
@@ -132,6 +150,9 @@ class AsyncmyPoolConnection(AbstractDBConnection):
         self.secret_arn = secret_arn
         self.is_test = is_test
         self.ca_bundle_path = ca_bundle_path
+        self.expected_db_user = expected_db_user
+        self.max_rows = max_rows
+        self.max_execution_time_ms = max_execution_time_ms
         self.pool: Optional[asyncmy.Pool] = None
         self.rw_lock = RWLock()
         self.created_time = datetime.now()
@@ -167,6 +188,12 @@ class AsyncmyPoolConnection(AbstractDBConnection):
             self.user, password = self._get_credentials_from_secret(
                 self.secret_arn, self.region, self.is_test
             )
+            if self.expected_db_user and self.user != self.expected_db_user:
+                raise ValueError(
+                    f'--db_user {self.expected_db_user!r} does not match the '
+                    f'Secrets Manager secret username {self.user!r}; refusing to '
+                    'connect as a different user than requested.'
+                )
 
         self.created_time = datetime.now()
 
@@ -199,6 +226,18 @@ class AsyncmyPoolConnection(AbstractDBConnection):
                     auth_flavour,
                 )
 
+        # init_command runs on every connection the pool opens (asyncmy.Pool
+        # forwards it to connect() for each new connection, including ones
+        # created lazily above minsize and ones created by a future pool
+        # recreation after check_expiry() — e.g. the 14-minute IAM auth
+        # refresh), so this reliably re-applies the limit without needing a
+        # per-acquire hook.
+        init_command = (
+            f'SET SESSION max_execution_time = {self.max_execution_time_ms}'
+            if self.max_execution_time_ms is not None
+            else None
+        )
+
         self.pool = await asyncmy.create_pool(
             host=self.host,
             port=self.port,
@@ -209,6 +248,7 @@ class AsyncmyPoolConnection(AbstractDBConnection):
             maxsize=self.max_size,
             ssl=ssl_ctx,
             autocommit=True,
+            init_command=init_command,
         )
 
         logger.info('Connection pool initialized successfully')
@@ -269,7 +309,20 @@ class AsyncmyPoolConnection(AbstractDBConnection):
                         # Check if there are results to fetch
                         if cursor.description:
                             columns = [desc[0] for desc in cursor.description]
-                            rows = await cursor.fetchall()
+
+                            # The full result set is already buffered
+                            # server-side into cursor.rowcount/cursor by
+                            # execute() regardless of how many rows we then
+                            # fetch, so capping with fetchmany(max_rows)
+                            # (never fetchall() + a Python-side slice) still
+                            # lets us detect truncation accurately via
+                            # rowcount without an extra round trip.
+                            if self.max_rows is not None:
+                                rows = await cursor.fetchmany(self.max_rows)
+                                truncated = cursor.rowcount > len(rows)
+                            else:
+                                rows = await cursor.fetchall()
+                                truncated = False
 
                             # Structure the response to match the Data API format
                             column_metadata = [{'name': col} for col in columns]
@@ -295,9 +348,13 @@ class AsyncmyPoolConnection(AbstractDBConnection):
                                         record.append({'stringValue': str(value)})
                                 records.append(record)
 
-                            result = {'columnMetadata': column_metadata, 'records': records}
+                            result = {
+                                'columnMetadata': column_metadata,
+                                'records': records,
+                                'truncated': truncated,
+                            }
                         else:
-                            result = {'columnMetadata': [], 'records': []}
+                            result = {'columnMetadata': [], 'records': [], 'truncated': False}
                 finally:
                     if self.readonly_query:
                         await conn.rollback()

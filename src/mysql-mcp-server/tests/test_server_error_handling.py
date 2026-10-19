@@ -301,6 +301,64 @@ class TestRunQuerySuccess:
         assert result[1]['name'] == 'Bob'
 
     @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    async def test_truncated_response_appends_truncation_marker(self, mock_map, mock_ctx):
+        """When execute_query reports truncated=True, append an explicit marker dict.
+
+        So the caller knows --max_rows cut the result set.
+        """
+        mock_conn = MagicMock()
+        mock_conn.readonly_query = False
+        mock_conn.execute_query = AsyncMock(
+            return_value={
+                'columnMetadata': [{'name': 'id'}],
+                'records': [[{'longValue': 1}], [{'longValue': 2}]],
+                'truncated': True,
+            }
+        )
+        mock_map.get.return_value = mock_conn
+
+        result = await run_query(
+            sql='SELECT id FROM users',
+            ctx=mock_ctx,
+            connection_method=ConnectionMethod.MYSQL_WIRE_IAM_PROTOCOL,
+            cluster_identifier='cluster-1',
+            db_endpoint='ep',
+            database='testdb',
+        )
+
+        assert len(result) == 3
+        assert result[0]['id'] == 1
+        assert result[1]['id'] == 2
+        assert result[2]['truncated'] is True
+        assert result[2]['returned_rows'] == 2
+
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    async def test_non_truncated_response_has_no_truncation_marker(self, mock_map, mock_ctx):
+        """When execute_query reports truncated=False, no marker is appended."""
+        mock_conn = MagicMock()
+        mock_conn.readonly_query = False
+        mock_conn.execute_query = AsyncMock(
+            return_value={
+                'columnMetadata': [{'name': 'id'}],
+                'records': [[{'longValue': 1}]],
+                'truncated': False,
+            }
+        )
+        mock_map.get.return_value = mock_conn
+
+        result = await run_query(
+            sql='SELECT id FROM users',
+            ctx=mock_ctx,
+            connection_method=ConnectionMethod.MYSQL_WIRE_IAM_PROTOCOL,
+            cluster_identifier='cluster-1',
+            db_endpoint='ep',
+            database='testdb',
+        )
+
+        assert len(result) == 1
+        assert all('truncated' not in row for row in result)
+
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
     async def test_successful_query_with_parameters(self, mock_map, mock_ctx):
         """Should pass parameters to execute_query."""
         mock_conn = MagicMock()

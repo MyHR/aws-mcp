@@ -62,6 +62,21 @@ readonly_query = True
 # on server start. When None, the package's bundled
 # Amazon RDS global bundle (verified against a pinned hash) is used.
 ca_bundle_path: Optional[str] = None
+# Optional database user to connect as, overriding the instance/cluster's
+# MasterUsername. Set by the CLI flag --db_user on server start; never
+# settable by the LLM client, since the operator (not the model) must
+# control which DB user credentials are used. None preserves the default
+# behavior of connecting as the master user.
+db_user_override: Optional[str] = None
+# Optional ceiling on the number of rows a wire-protocol run_query call
+# returns to the LLM client, set by the CLI flag --max_rows on server
+# start. None means unlimited (current behavior, unchanged).
+max_rows: Optional[int] = None
+# Optional per-session statement execution time limit (milliseconds),
+# applied via `SET SESSION max_execution_time` on every pooled connection,
+# set by the CLI flag --max_execution_time_ms on server start. None means
+# no limit is set (current behavior, unchanged).
+max_execution_time_ms: Optional[int] = None
 
 
 class DummyCtx(Context):
@@ -201,7 +216,24 @@ async def run_query(
         response = await db_connection.execute_query(sql, query_parameters)
 
         logger.success(f'run_query successfully executed query:{sql}')
-        return parse_execute_response(response)
+        rows = parse_execute_response(response)
+        if response.get('truncated'):
+            # Appended rather than a separate return field: run_query's
+            # return type is list[dict] (no envelope for metadata), so an
+            # explicit marker row is the only way to tell the LLM client
+            # that --max_rows cut the result set, mirroring how error cases
+            # already surface as a special {'error': ...} dict in this list.
+            rows.append(
+                {
+                    'truncated': True,
+                    'returned_rows': len(rows),
+                    'note': (
+                        'Result set truncated by --max_rows; more rows were '
+                        'available than shown here.'
+                    ),
+                }
+            )
+        return rows
     except ClientError as e:
         # AWS ClientError has a structured Error.Code we can safely surface;
         # the message can include identity strings, so we keep that out of
@@ -627,6 +659,9 @@ def internal_connect_to_database(
     global db_connection_map
     global readonly_query
     global ca_bundle_path
+    global db_user_override
+    global max_rows
+    global max_execution_time_ms
 
     logger.info(
         f'Enter internal_connect_to_database\n'
@@ -816,10 +851,15 @@ def internal_connect_to_database(
             # positive: this is an explicit "no secret" sentinel, not a
             # credential value.
             secret_arn='',  # nosec B106
-            db_user=masteruser,
+            # --db_user overrides the instance/cluster's MasterUsername so the
+            # IAM token is minted for an operator-chosen, least-privilege DB
+            # user instead of the master user.
+            db_user=db_user_override or masteruser,
             region=region,
             is_iam_auth=True,
             ca_bundle_path=ca_bundle_path,
+            max_rows=max_rows,
+            max_execution_time_ms=max_execution_time_ms,
         )
 
     elif connection_method == ConnectionMethod.RDS_API:
@@ -844,6 +884,14 @@ def internal_connect_to_database(
             # Wire the operator's --ca_bundle override into the Secrets Manager
             # TLS path too; without this the override is unreachable here.
             ca_bundle_path=ca_bundle_path,
+            # Secrets Manager supplies the actual credentials, so --db_user
+            # can't select the connecting user here; it can only assert what
+            # the operator expects that user to be. Passed through so the
+            # connection fails loudly on mismatch instead of silently using
+            # whatever user the secret happens to contain.
+            expected_db_user=db_user_override or None,
+            max_rows=max_rows,
+            max_execution_time_ms=max_execution_time_ms,
         )
 
     # Every supported connection_method assigns db_connection above (the
@@ -873,6 +921,9 @@ def main():
     global db_connection_map
     global readonly_query
     global ca_bundle_path
+    global db_user_override
+    global max_rows
+    global max_execution_time_ms
 
     parser = argparse.ArgumentParser(
         description='An AWS Labs Model Context Protocol (MCP) server for MySQL'
@@ -899,6 +950,50 @@ def main():
     parser.add_argument('--database', help='Database name')
     parser.add_argument('--port', type=int, default=3306, help='Database port (default: 3306)')
     parser.add_argument(
+        '--db_user',
+        default=None,
+        help=(
+            'Database user to connect as, overriding the instance/cluster '
+            'MasterUsername. This is a server-operator flag only; it is not '
+            'exposed to the LLM client as a tool parameter, since the model '
+            'must never choose which DB user is used. For '
+            'MYSQL_WIRE_IAM_PROTOCOL this is the IAM-auth user. For '
+            'MYSQL_WIRE_PROTOCOL with a Secrets Manager secret, the secret '
+            'still supplies the actual credentials; this flag instead '
+            'asserts the expected username and fails the connection if it '
+            "does not match the secret's username, rather than silently "
+            'connecting as a different user than requested. Not applicable '
+            'to RDS_API. Omit to keep connecting as the master user '
+            '(default, unchanged behavior).'
+        ),
+    )
+    parser.add_argument(
+        '--max_rows',
+        type=int,
+        default=None,
+        help=(
+            'Maximum number of rows a wire-protocol (mysqlwire / '
+            'mysqlwire_iam) run_query call returns to the LLM client. '
+            'Extra rows are never fetched off the result set beyond this '
+            'cap. When the result set has more rows than this, the '
+            "response includes a 'truncated' marker so the caller knows "
+            'rows were cut. Omit for unlimited rows (default, unchanged '
+            'behavior). Not applicable to rdsapi.'
+        ),
+    )
+    parser.add_argument(
+        '--max_execution_time_ms',
+        type=int,
+        default=None,
+        help=(
+            'Per-session statement execution time limit in milliseconds, '
+            "applied as 'SET SESSION max_execution_time = <value>' on every "
+            'pooled connection (including connections created after an IAM '
+            'auth pool refresh). Omit for no limit (default, unchanged '
+            'behavior).'
+        ),
+    )
+    parser.add_argument(
         '--ca_bundle',
         default=None,
         help=(
@@ -921,10 +1016,16 @@ def main():
         f'allow_write_query:{args.allow_write_query}\n'
         f'database:{args.database}\n'
         f'port:{args.port}\n'
+        f'db_user:{args.db_user}\n'
+        f'max_rows:{args.max_rows}\n'
+        f'max_execution_time_ms:{args.max_execution_time_ms}\n'
     )
 
     readonly_query = not args.allow_write_query
     ca_bundle_path = args.ca_bundle
+    db_user_override = args.db_user
+    max_rows = args.max_rows
+    max_execution_time_ms = args.max_execution_time_ms
 
     try:
         if args.db_type:
