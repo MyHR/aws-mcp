@@ -1042,7 +1042,12 @@ def main():
                 )
                 sys.exit(1)
 
-            cluster_identifier = args.db_cluster_arn.split(':')[-1]
+            # db_cluster_arn is only required for Aurora; a plain RDS
+            # instance connects via db_endpoint alone (internal_connect_to_database
+            # already allows cluster_identifier=None for that case).
+            cluster_identifier = (
+                args.db_cluster_arn.split(':')[-1] if args.db_cluster_arn else None
+            )
             db_connection, llm_response = internal_connect_to_database(
                 region=args.region,
                 database_type=parsed_db_type,

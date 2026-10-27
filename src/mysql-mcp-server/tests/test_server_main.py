@@ -112,6 +112,41 @@ class TestMainArgvParsing:
         assert exc.value.code == 1
         mock_mcp_run.assert_not_called()
 
+    # Bug: https://github.com/MyHR/issues/issues/7293
+    @patch('awslabs.mysql_mcp_server.server.mcp.run')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    @patch('awslabs.mysql_mcp_server.server.asyncio.run')
+    @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
+    def test_plain_rds_mysql_without_cluster_arn_connects_via_endpoint(
+        self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run
+    ):
+        """A non-Aurora instance addressed by --db_endpoint alone must still connect.
+
+        No --db_cluster_arn: internal_connect_to_database must be reached with
+        cluster_identifier=None, not crash parsing a None ARN.
+        """
+        from awslabs.mysql_mcp_server import server
+
+        mock_connect.return_value = (MagicMock(), json.dumps({}))
+        mock_asyncio_run.return_value = [{'columnMetadata': [], 'records': []}]
+        argv = [
+            'awslabs.mysql-mcp-server',
+            '--connection_method',
+            'MYSQL_WIRE_IAM_PROTOCOL',
+            '--db_type',
+            'mysql',
+            '--db_endpoint',
+            'my-instance.xyz.ap-southeast-2.rds.amazonaws.com',
+            '--db_user',
+            'support_agent',
+        ]
+
+        with patch.object(sys, 'argv', argv):
+            server.main()
+
+        assert mock_connect.call_args.kwargs['cluster_identifier'] is None
+        mock_mcp_run.assert_called_once()
+
     @patch('awslabs.mysql_mcp_server.server.mcp.run')
     @patch('awslabs.mysql_mcp_server.server.db_connection_map')
     def test_no_db_type_skips_validation_and_runs_mcp(self, mock_map, mock_mcp_run):
