@@ -75,7 +75,9 @@ class TestMainArgvParsing:
         assert kwargs['database'] == 'app'
         assert kwargs['port'] == 3306
         mock_mcp_run.assert_called_once()
-        mock_map.close_all_sync.assert_called_once()
+        # Once right after startup validation (drops the connection bound to
+        # that asyncio.run() loop) and once more in the finally block.
+        assert mock_map.close_all_sync.call_count == 2
 
     @patch('awslabs.mysql_mcp_server.server.mcp.run')
     @patch('awslabs.mysql_mcp_server.server.db_connection_map')
@@ -295,6 +297,35 @@ class TestMainArgvParsing:
 
         assert server.max_execution_time_ms == 5000
 
+    # Bug: https://github.com/MyHR/issues/issues/7293
+    @patch('awslabs.mysql_mcp_server.server.mcp.run')
+    @patch('awslabs.mysql_mcp_server.server.db_connection_map')
+    @patch('awslabs.mysql_mcp_server.server.asyncio.run')
+    @patch('awslabs.mysql_mcp_server.server.internal_connect_to_database')
+    def test_drops_validation_connection_before_mcp_run(
+        self, mock_connect, mock_asyncio_run, mock_map, mock_mcp_run, base_argv
+    ):
+        """close_all_sync() must run before mcp.run(), not just eventually.
+
+        The validation connection's pool is bound to the asyncio.run() loop
+        used for the startup SELECT 1, which is closed by the time mcp.run()
+        starts a new one. Dropping it only in the finally block is too late --
+        the first real tool call would reuse a pool bound to a dead loop and
+        raise "bound to a different event loop".
+        """
+        from awslabs.mysql_mcp_server import server
+
+        mock_connect.return_value = (MagicMock(), json.dumps({}))
+        mock_asyncio_run.return_value = [{'columnMetadata': [], 'records': []}]
+        call_order = []
+        mock_map.close_all_sync.side_effect = lambda: call_order.append('close_all_sync')
+        mock_mcp_run.side_effect = lambda: call_order.append('mcp_run')
+
+        with patch.object(sys, 'argv', base_argv):
+            server.main()
+
+        assert call_order.index('close_all_sync') < call_order.index('mcp_run')
+
     @patch('awslabs.mysql_mcp_server.server.mcp.run')
     @patch('awslabs.mysql_mcp_server.server.db_connection_map')
     @patch('awslabs.mysql_mcp_server.server.asyncio.run')
@@ -330,4 +361,6 @@ class TestMainArgvParsing:
         with patch.object(sys, 'argv', base_argv), pytest.raises(KeyboardInterrupt):
             server.main()
 
-        mock_map.close_all_sync.assert_called_once()
+        # Once after startup validation, once more in the finally block even
+        # though mcp.run() raised in between.
+        assert mock_map.close_all_sync.call_count == 2

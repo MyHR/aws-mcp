@@ -1083,6 +1083,15 @@ def main():
                 else:
                     logger.success('Successfully validated database connection to MySQL')
 
+                # The validation connection's async primitives (e.g. the pool's
+                # aiorwlock) are bound to the asyncio.run() loop above, which
+                # is now closed. mcp.run() below starts its own loop; reusing
+                # this cached connection from it raises "bound to a different
+                # event loop" on the very first real tool call. Drop it now,
+                # while truly outside any running loop, so the first real
+                # call creates a fresh pool bound to the correct loop.
+                db_connection_map.close_all_sync()
+
         logger.info('MySQL MCP server started')
         mcp.run()
         logger.info('MySQL MCP server stopped')
