@@ -1042,7 +1042,12 @@ def main():
                 )
                 sys.exit(1)
 
-            cluster_identifier = args.db_cluster_arn.split(':')[-1]
+            # db_cluster_arn is only required for Aurora; a plain RDS
+            # instance connects via db_endpoint alone (internal_connect_to_database
+            # already allows cluster_identifier=None for that case).
+            cluster_identifier = (
+                args.db_cluster_arn.split(':')[-1] if args.db_cluster_arn else None
+            )
             db_connection, llm_response = internal_connect_to_database(
                 region=args.region,
                 database_type=parsed_db_type,
@@ -1077,6 +1082,15 @@ def main():
                     sys.exit(1)
                 else:
                     logger.success('Successfully validated database connection to MySQL')
+
+                # The validation connection's async primitives (e.g. the pool's
+                # aiorwlock) are bound to the asyncio.run() loop above, which
+                # is now closed. mcp.run() below starts its own loop; reusing
+                # this cached connection from it raises "bound to a different
+                # event loop" on the very first real tool call. Drop it now,
+                # while truly outside any running loop, so the first real
+                # call creates a fresh pool bound to the correct loop.
+                db_connection_map.close_all_sync()
 
         logger.info('MySQL MCP server started')
         mcp.run()
